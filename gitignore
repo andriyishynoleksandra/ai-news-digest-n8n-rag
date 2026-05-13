@@ -1,0 +1,11 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / credentials
+.env
+*.key
+*credentials*.json
+
+# n8n local data
+.n8n/

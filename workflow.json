@@ -1,0 +1,620 @@
+{
+  "name": "AI News Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -400,
+        0
+      ],
+      "id": "node-schedule-trigger",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        -100,
+        -200
+      ],
+      "id": "node-rss-techcrunch-ai",
+      "name": "RSS TechCrunch AI"
+    },
+    {
+      "parameters": {
+        "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        -100,
+        0
+      ],
+      "id": "node-rss-the-verge-ai",
+      "name": "RSS The Verge AI"
+    },
+    {
+      "parameters": {
+        "url": "https://huggingface.co/blog/feed.xml",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        -100,
+        200
+      ],
+      "id": "node-rss-huggingface",
+      "name": "RSS HuggingFace"
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        200,
+        0
+      ],
+      "id": "node-merge",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize items from 3 RSS sources into a single schema\nconst items = $input.all();\n\nfunction stripHtml(html) {\n  if (!html) return '';\n  return html\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/g, ' ')\n    .replace(/&laquo;/g, '«').replace(/&raquo;/g, '»')\n    .replace(/&quot;/g, '\"')\n    .replace(/&#8217;/g, \"'\").replace(/&#8220;/g, '\"').replace(/&#8221;/g, '\"')\n    .replace(/&#8230;/g, '...').replace(/&amp;/g, '&')\n    .replace(/&ndash;/g, '–').replace(/&mdash;/g, '—')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nconst normalized = items.map(item => {\n  const d = item.json;\n  let source = 'Unknown';\n  if (d.link) {\n    if (d.link.includes('techcrunch.com')) source = 'TechCrunch AI';\n    else if (d.link.includes('theverge.com')) source = 'The Verge AI';\n    else if (d.link.includes('huggingface.co')) source = 'HuggingFace';\n  }\n\n  const content = stripHtml(d.content || d.contentSnippet || d.summary || '');\n\n  return {\n    json: {\n      title: (d.title || '').trim(),\n      link: d.link,\n      content: content.slice(0, 1500),\n      published_at: d.pubDate || d.isoDate || new Date().toISOString(),\n      source: source,\n    }\n  };\n});\n\nreturn normalized.filter(item =>\n  item.json.title && item.json.title.length > 10 && item.json.link\n);\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        0
+      ],
+      "id": "node-normalize",
+      "name": "Normalize"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter out URLs already in Google Sheets\n// SHEETS_CSV_URL must point to \"Publish to web\" CSV of the digest tab.\nconst SHEETS_CSV_URL = 'YOUR_PUBLISHED_SHEETS_CSV_URL';\n\nconst items = $input.all();\n\nlet processedUrls = new Set();\n\ntry {\n  const csv = await this.helpers.httpRequest({\n    method: 'GET',\n    url: SHEETS_CSV_URL,\n    json: false,\n  });\n\n  const lines = String(csv).split('\\n');\n  // First column = run_date, second = url\n  for (let i = 1; i < lines.length; i++) {\n    const cols = lines[i].split(',');\n    if (cols.length >= 2) {\n      const url = cols[1].replace(/^\"|\"$/g, '').trim();\n      if (url) processedUrls.add(url);\n    }\n  }\n} catch (e) {\n  console.log('Could not fetch processed URLs:', e.message);\n}\n\nconst newItems = items.filter(item => !processedUrls.has(item.json.link));\nconsole.log(`Total: ${items.length}, already in Sheets: ${processedUrls.size}, new: ${newItems.length}`);\n\nreturn newItems;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        0
+      ],
+      "id": "node-deduplicate-by-url",
+      "name": "Deduplicate by URL"
+    },
+    {
+      "parameters": {
+        "maxItems": 10
+      },
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        800,
+        0
+      ],
+      "id": "node-limit",
+      "name": "Limit"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1000,
+        0
+      ],
+      "id": "node-loop-over-items",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Generate OpenAI embedding for the current news item\nconst OPENAI_API_KEY = 'YOUR_OPENAI_API_KEY';\nconst news = $input.item.json;\n\nconst queryText = `${news.title}. ${news.content}`.slice(0, 2000);\n\nconst resp = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://api.openai.com/v1/embeddings',\n  headers: {\n    'Content-Type': 'application/json',\n    'Authorization': `Bearer ${OPENAI_API_KEY}`,\n  },\n  body: {\n    model: 'text-embedding-3-small',\n    input: queryText,\n  },\n  json: true,\n});\n\nreturn {\n  json: {\n    ...news,\n    embedding: resp.data[0].embedding,\n    embed_query: queryText,\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        0
+      ],
+      "id": "node-openai-embedding",
+      "name": "OpenAI Embedding"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Anti-duplicate: search archive for similar news in last 30 days\nconst SUPABASE_URL = 'YOUR_SUPABASE_PROJECT_URL';\nconst SUPABASE_KEY = 'YOUR_SUPABASE_SERVICE_ROLE_KEY';\n\nconst news = $input.item.json;\n\nconst resp = await this.helpers.httpRequest({\n  method: 'POST',\n  url: `${SUPABASE_URL}/rest/v1/rpc/match_news_archive`,\n  headers: {\n    'Content-Type': 'application/json',\n    'apikey': SUPABASE_KEY,\n    'Authorization': `Bearer ${SUPABASE_KEY}`,\n  },\n  body: {\n    query_embedding: news.embedding,\n    days_back: 30,\n    match_threshold: 0.85,\n    match_count: 3,\n  },\n  json: true,\n});\n\nconst matches = resp || [];\nconst isDuplicate = matches.length > 0;\n\nreturn {\n  json: {\n    ...news,\n    is_duplicate: isDuplicate,\n    duplicate_match: isDuplicate ? {\n      url: matches[0].url,\n      title: matches[0].title,\n      similarity: Number(matches[0].similarity).toFixed(3),\n      published_at: matches[0].published_at,\n    } : null,\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        0
+      ],
+      "id": "node-archive-lookup",
+      "name": "Archive Lookup"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "dup-check",
+              "leftValue": "={{ $json.is_duplicate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1600,
+        0
+      ],
+      "id": "node-is-duplicate?",
+      "name": "Is Duplicate?"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ \"TITLE: \" + $json.title + \"\\nSOURCE: \" + $json.source + \"\\nCONTENT: \" + ($json.content || \"\").substring(0, 1000) }}",
+        "options": {
+          "systemMessage": "You are an editorial assistant for an AI/ML news digest.\nYou receive one news item and produce a structured classification.\n\nCategories (pick exactly one):\n- Models & Releases — new models, version bumps, weights releases\n- Funding & M&A — funding rounds, acquisitions, IPOs\n- Research — papers, novel methods, benchmark results\n- Products — new product launches, feature drops, integrations\n- Policy & Regulation — laws, government action, lawsuits\n- Infrastructure — chips, datacenters, compute, training systems\n- People & Hiring — executive moves, key hires, departures\n- Other — anything that doesn't clearly fit above\n\nImportance:\n- high: industry-wide impact (frontier model release, billion-dollar funding, major regulation)\n- medium: noteworthy in its category, but not generational\n- low: incremental update, minor announcement\n\nOUTPUT STRICT JSON ONLY (no preamble, no markdown):\n{\"category\":\"<one of above>\",\"summary\":\"1-2 concise sentences in English explaining what happened and why it matters\",\"importance\":\"high|medium|low\"}\n\nBe concrete. Do not invent facts. If the snippet is too thin, set importance to \"low\"."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1850,
+        -100
+      ],
+      "id": "node-ai-agent",
+      "name": "AI Agent",
+      "retryOnFail": true,
+      "waitBetweenTries": 500
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.5-flash-lite",
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        1750,
+        100
+      ],
+      "id": "node-google-gemini",
+      "name": "Google Gemini"
+    },
+    {
+      "parameters": {
+        "amount": 5
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2100,
+        -100
+      ],
+      "id": "node-wait",
+      "name": "Wait",
+      "webhookId": "ai-news-wait"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Parse JSON output from LLM, merge with news data\nconst llmOutput = $json.output || '';\nconst news = $('Archive Lookup').item.json;\n\nlet parsed;\ntry {\n  // Strip optional ```json fences\n  const cleaned = llmOutput\n    .replace(/^```json\\s*/i, '')\n    .replace(/\\s*```$/i, '')\n    .trim();\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  return {\n    json: {\n      ...news,\n      llm_error: e.message,\n      raw_output: llmOutput,\n      category: 'Other',\n      summary: news.content.slice(0, 200),\n      importance: 'low',\n    }\n  };\n}\n\nreturn {\n  json: {\n    title: news.title,\n    link: news.link,\n    source: news.source,\n    published_at: news.published_at,\n    embedding: news.embedding,\n    category: parsed.category || 'Other',\n    summary: parsed.summary || '',\n    importance: parsed.importance || 'low',\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2300,
+        -100
+      ],
+      "id": "node-parse-llm-output",
+      "name": "Parse LLM Output"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Insert processed news into archive (for future anti-duplicate checks)\nconst SUPABASE_URL = 'YOUR_SUPABASE_PROJECT_URL';\nconst SUPABASE_KEY = 'YOUR_SUPABASE_SERVICE_ROLE_KEY';\n\nconst news = $input.item.json;\n\nawait this.helpers.httpRequest({\n  method: 'POST',\n  url: `${SUPABASE_URL}/rest/v1/news_archive`,\n  headers: {\n    'Content-Type': 'application/json',\n    'apikey': SUPABASE_KEY,\n    'Authorization': `Bearer ${SUPABASE_KEY}`,\n    'Prefer': 'return=minimal',\n  },\n  body: {\n    url: news.link,\n    title: news.title,\n    source: news.source,\n    category: news.category,\n    summary: news.summary,\n    importance: news.importance,\n    published_at: news.published_at,\n    embedding: news.embedding,\n  },\n  json: true,\n});\n\n// Drop embedding from passed-along payload (Sheets doesn't need 1536 numbers)\nconst { embedding, ...rest } = news;\nreturn { json: rest };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2500,
+        -100
+      ],
+      "id": "node-save-to-archive",
+      "name": "Save to Archive"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEETS_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_date": "={{ $now.toISO() }}",
+            "url": "={{ $json.link }}",
+            "title": "={{ $json.title }}",
+            "source": "={{ $json.source }}",
+            "category": "={{ $json.category }}",
+            "importance": "={{ $json.importance }}",
+            "summary": "={{ $json.summary }}",
+            "published_at": "={{ $json.published_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "run_date",
+              "displayName": "run_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "url",
+              "displayName": "url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "importance",
+              "displayName": "importance",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "summary",
+              "displayName": "summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "published_at",
+              "displayName": "published_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2700,
+        -100
+      ],
+      "id": "node-append-to-sheet",
+      "name": "Append to Sheet"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "RSS TechCrunch AI",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "RSS The Verge AI",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "RSS HuggingFace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RSS TechCrunch AI": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RSS The Verge AI": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "RSS HuggingFace": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "Deduplicate by URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deduplicate by URL": {
+      "main": [
+        [
+          {
+            "node": "Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limit": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [
+          {
+            "node": "OpenAI Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Embedding": {
+      "main": [
+        [
+          {
+            "node": "Archive Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Archive Lookup": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM Output": {
+      "main": [
+        [
+          {
+            "node": "Save to Archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Archive": {
+      "main": [
+        [
+          {
+            "node": "Append to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append to Sheet": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "ai-news-digest",
+  "tags": []
+}
